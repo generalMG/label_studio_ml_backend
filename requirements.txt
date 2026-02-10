@@ -1,0 +1,16 @@
+label-studio-ml
+torch
+torchvision
+paddlepaddle-gpu
+paddleocr
+transformers
+qwen_vl_utils
+pymupdf
+Pillow
+requests
+accelerate
+bitsandbytes
+redis
+rq
+opencv-python-headless
+protobuf

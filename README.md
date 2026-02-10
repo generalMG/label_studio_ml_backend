@@ -286,3 +286,43 @@ Recommended labeling configuration for the annotation project:
             maxSubmissions="1" rows="3"/>
 </View>
 ```
+
+## Docker Deployment (Recommended)
+
+Run the full stack (Label Studio + Qwen Backend + Database) using Docker Compose.
+
+### Prerequisites
+
+- Docker Engine & Docker Compose
+- NVIDIA Container Toolkit (for GPU support)
+
+### Quick Start
+
+1. **Build and Run**
+
+   ```bash
+   cd qwen_backend
+   docker-compose up --build -d
+   ```
+
+2. **Access Label Studio**
+   - Open [http://localhost:8080](http://localhost:8080)
+   - Sign up/Login
+
+3. **Configure Project**
+   - Create a new project
+   - Go to **Settings > Machine Learning**
+   - Add Backend URL: `http://qwen-backend:9090`
+   - Toggle "Use for interactive preannotations"
+
+4. **Stop Services**
+
+   ```bash
+   docker-compose down
+   ```
+
+### Troubleshooting
+
+- **GPU not found**: Ensure `nvidia-container-toolkit` is installed and Docker daemon is configured with `"default-runtime": "nvidia"`.
+- **Backend Connection Error**: Ensure the backend container is running (`docker-compose ps`) and accessible from the Label Studio container (networking is handled automatically by Compose).
+

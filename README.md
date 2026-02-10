@@ -1,6 +1,6 @@
-# CAD AI - Qwen Backend
+# Labeling - Qwen Backend
 
-AI-powered text extraction pipeline for CAD engineering drawings using **Qwen2.5-VL-7B-Instruct** (vision-language model) and **PaddleOCR**, with full **Label Studio** integration for collaborative annotation.
+AI-powered text extraction pipeline for any documents using **Qwen2.5-VL-7B-Instruct** (vision-language model) and **PaddleOCR**, with full **Label Studio** integration for collaborative annotation.
 
 ## Architecture
 

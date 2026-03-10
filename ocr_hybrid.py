@@ -8,16 +8,16 @@ from pathlib import Path
 import fitz
 import torch
 from PIL import Image, ImageDraw, ImageFont
-from transformers import AutoProcessor, BitsAndBytesConfig, Qwen2_5_VLForConditionalGeneration
+from transformers import AutoProcessor, BitsAndBytesConfig, Qwen3VLForConditionalGeneration
 from qwen_vl_utils import process_vision_info
 
-MODEL_ID = "Qwen/Qwen2.5-VL-7B-Instruct"
+MODEL_ID = "Qwen/Qwen3-VL-8B-Instruct"
 MAX_PIXELS = 2048 * 2048
 MIN_PIXELS = 256 * 256
 RENDER_DPI = 300
 MAX_DIM = 2048
 CROP_PAD = 4
-CONF_THRESHOLD = 0.9
+CONF_THRESHOLD = 0.99
 
 KR_FONT = "/home/mg_server/.local/share/fonts/NotoSansCJKkr-Regular.otf"
 
@@ -55,7 +55,7 @@ def load_qwen():
         bnb_4bit_quant_type="nf4",
         bnb_4bit_use_double_quant=True,
     )
-    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+    model = Qwen3VLForConditionalGeneration.from_pretrained(
         MODEL_ID,
         quantization_config=quant_config,
         device_map="auto",
@@ -134,6 +134,8 @@ def main():
     parser.add_argument("--lang", default="korean", help="OCR language")
     parser.add_argument("--conf-threshold", type=float, default=CONF_THRESHOLD,
                         help="PaddleOCR confidence threshold; below this sends to Qwen (default: 0.9)")
+    parser.add_argument("--detect-only", action="store_true",
+                        help="Skip PaddleOCR recognition; send ALL detected regions to Qwen")
     args = parser.parse_args()
 
     pdf_path = Path(args.input)
@@ -155,6 +157,8 @@ def main():
         "--output", str(detect_json),
         "--lang", args.lang,
     ]
+    if args.detect_only:
+        cmd.append("--detect-only")
     print(f"Running: {' '.join(cmd)}")
     result = subprocess.run(cmd, capture_output=False)
     if result.returncode != 0:
@@ -165,12 +169,15 @@ def main():
         detect_data = json.load(f)
 
     total_det = sum(len(p["detections"]) for p in detect_data["pages"])
-    low_conf = sum(
-        1 for p in detect_data["pages"]
-        for d in p["detections"]
-        if d["paddle_conf"] < args.conf_threshold
-    )
-    print(f"Phase 1 complete: {total_det} regions, {low_conf} below conf {args.conf_threshold} → sending to Qwen.\n")
+    if args.detect_only:
+        print(f"Phase 1 complete: {total_det} regions (detect-only → ALL sent to Qwen).\n")
+    else:
+        low_conf = sum(
+            1 for p in detect_data["pages"]
+            for d in p["detections"]
+            if d["paddle_conf"] < args.conf_threshold
+        )
+        print(f"Phase 1 complete: {total_det} regions, {low_conf} below conf {args.conf_threshold} → sending to Qwen.\n")
 
     # === Phase 2: Qwen recognition (individual crops, low-confidence only) ===
     print("=== Phase 2: Qwen Recognition ===")

@@ -28,7 +28,7 @@ def pdf_to_images(pdf_path: str) -> list[Image.Image]:
     return images
 
 
-def detect_text(ocr_engine, image: Image.Image) -> list[dict]:
+def detect_text(ocr_engine, image: Image.Image, detect_only: bool = False) -> list[dict]:
     img_array = np.array(image)
     results = list(ocr_engine.predict(img_array))
     detections = []
@@ -36,9 +36,26 @@ def detect_text(ocr_engine, image: Image.Image) -> list[dict]:
         return detections
 
     r = results[0]
+    polys = r.get("dt_polys", [])
+
+    if detect_only:
+        for idx in range(len(polys)):
+            poly = polys[idx].tolist() if idx < len(polys) else []
+            if not poly:
+                continue
+            xs = [p[0] for p in poly]
+            ys = [p[1] for p in poly]
+            x1, y1, x2, y2 = int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))
+            detections.append({
+                "paddle_text": "",
+                "paddle_conf": 0.0,
+                "bbox": [x1, y1, x2, y2],
+                "polygon": [[int(p[0]), int(p[1])] for p in poly],
+            })
+        return detections
+
     texts = r.get("rec_texts", [])
     scores = r.get("rec_scores", [])
-    polys = r.get("dt_polys", [])
     boxes = r.get("rec_boxes", [])
 
     for idx in range(len(texts)):
@@ -68,6 +85,8 @@ def main():
     parser.add_argument("--input", required=True)
     parser.add_argument("--output", required=True, help="Output JSON path for detections")
     parser.add_argument("--lang", default="korean")
+    parser.add_argument("--detect-only", action="store_true",
+                        help="Skip PaddleOCR recognition, return bboxes only (conf=0)")
     args = parser.parse_args()
 
     pdf_path = Path(args.input)
@@ -80,6 +99,8 @@ def main():
     print(f"{len(images)} pages.\n", file=sys.stderr)
 
     print("Initializing PaddleOCR...", file=sys.stderr)
+    if args.detect_only:
+        print("  (detect-only mode: skipping recognition)", file=sys.stderr)
     ocr = PaddleOCR(
         use_textline_orientation=True,
         lang=args.lang,
@@ -89,7 +110,7 @@ def main():
 
     all_pages = []
     for i, img in enumerate(images):
-        detections = detect_text(ocr, img)
+        detections = detect_text(ocr, img, detect_only=args.detect_only)
         print(f"  Page {i + 1}: {len(detections)} regions", file=sys.stderr)
         all_pages.append({
             "page": i + 1,

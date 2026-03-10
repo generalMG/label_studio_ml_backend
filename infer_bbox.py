@@ -7,10 +7,10 @@ from pathlib import Path
 import fitz
 import torch
 from PIL import Image, ImageDraw, ImageFont
-from transformers import AutoProcessor, BitsAndBytesConfig, Qwen2_5_VLForConditionalGeneration
+from transformers import AutoProcessor, BitsAndBytesConfig, Qwen3VLForConditionalGeneration
 from qwen_vl_utils import process_vision_info
 
-MODEL_ID = "Qwen/Qwen2.5-VL-7B-Instruct"
+MODEL_ID = "Qwen/Qwen3-VL-8B-Instruct"
 MAX_PIXELS = 2048 * 2048
 MIN_PIXELS = 256 * 256
 RENDER_DPI = 300
@@ -64,7 +64,7 @@ def load_model():
         bnb_4bit_quant_type="nf4",
         bnb_4bit_use_double_quant=True,
     )
-    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+    model = Qwen3VLForConditionalGeneration.from_pretrained(
         MODEL_ID,
         quantization_config=quant_config,
         device_map="auto",

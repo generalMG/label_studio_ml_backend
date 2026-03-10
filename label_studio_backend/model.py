@@ -15,7 +15,7 @@ import torch
 from label_studio_ml.model import LabelStudioMLBase
 from PIL import Image
 from qwen_vl_utils import process_vision_info
-from transformers import AutoProcessor, BitsAndBytesConfig, Qwen2_5_VLForConditionalGeneration
+from transformers import AutoProcessor, BitsAndBytesConfig, Qwen3VLForConditionalGeneration
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +34,7 @@ def safe_get_result_from_job_id(self, job_id):
 
 JobManager.get_result_from_job_id = safe_get_result_from_job_id
 
-MODEL_ID = "Qwen/Qwen2.5-VL-7B-Instruct"
+MODEL_ID = "Qwen/Qwen3-VL-8B-Instruct"
 MAX_PIXELS = 2048 * 2048
 MIN_PIXELS = 256 * 256
 RENDER_DPI = 300
@@ -129,7 +129,7 @@ class HybridOCRBackend(LabelStudioMLBase):
             bnb_4bit_quant_type="nf4",
             bnb_4bit_use_double_quant=True,
         )
-        self.qwen_model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+        self.qwen_model = Qwen3VLForConditionalGeneration.from_pretrained(
             MODEL_ID,
             quantization_config=quant_config,
             device_map="auto",

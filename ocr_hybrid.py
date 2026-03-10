@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -18,22 +19,48 @@ RENDER_DPI = 300
 MAX_DIM = 2048
 CROP_PAD = 4
 CONF_THRESHOLD = 0.99
+MAX_PDF_PAGES = 200
+MAX_RENDER_PIXELS = 16 * 1024 * 1024
 
 KR_FONT = "/home/mg_server/.local/share/fonts/NotoSansCJKkr-Regular.otf"
 
 
-def pdf_to_images(pdf_path: str) -> list[Image.Image]:
+def _safe_render_matrix(page: fitz.Page, max_render_pixels: int) -> fitz.Matrix:
+    base_zoom = RENDER_DPI / 72
+    target_w = max(page.rect.width * base_zoom, 1.0)
+    target_h = max(page.rect.height * base_zoom, 1.0)
+    target_pixels = target_w * target_h
+    if target_pixels > max_render_pixels:
+        scale = (max_render_pixels / target_pixels) ** 0.5
+        zoom = max(base_zoom * scale, 0.1)
+    else:
+        zoom = base_zoom
+    return fitz.Matrix(zoom, zoom)
+
+
+def pdf_to_images(
+    pdf_path: str,
+    max_pages: int = MAX_PDF_PAGES,
+    max_render_pixels: int = MAX_RENDER_PIXELS,
+) -> list[Image.Image]:
     doc = fitz.open(pdf_path)
     images = []
-    for i, page in enumerate(doc):
-        mat = fitz.Matrix(RENDER_DPI / 72, RENDER_DPI / 72)
-        pix = page.get_pixmap(matrix=mat)
-        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-        if img.width > MAX_DIM or img.height > MAX_DIM:
-            img.thumbnail((MAX_DIM, MAX_DIM), Image.LANCZOS)
-        print(f"  Page {i + 1}: {img.width}x{img.height}")
-        images.append(img)
-    doc.close()
+    try:
+        if doc.page_count > max_pages:
+            raise ValueError(
+                f"PDF has {doc.page_count} pages; limit is {max_pages}. "
+                "Increase MAX_PDF_PAGES to allow this file."
+            )
+        for i, page in enumerate(doc):
+            mat = _safe_render_matrix(page, max_render_pixels)
+            pix = page.get_pixmap(matrix=mat)
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            if img.width > MAX_DIM or img.height > MAX_DIM:
+                img.thumbnail((MAX_DIM, MAX_DIM), Image.LANCZOS)
+            print(f"  Page {i + 1}: {img.width}x{img.height}")
+            images.append(img)
+    finally:
+        doc.close()
     return images
 
 
@@ -134,6 +161,10 @@ def main():
     parser.add_argument("--lang", default="korean", help="OCR language")
     parser.add_argument("--conf-threshold", type=float, default=CONF_THRESHOLD,
                         help="PaddleOCR confidence threshold; below this sends to Qwen (default: 0.9)")
+    parser.add_argument("--max-pages", type=int, default=int(os.environ.get("MAX_PDF_PAGES", MAX_PDF_PAGES)),
+                        help="Maximum PDF page count allowed")
+    parser.add_argument("--max-render-pixels", type=int, default=int(os.environ.get("MAX_RENDER_PIXELS", MAX_RENDER_PIXELS)),
+                        help="Maximum rendered pixels per page before downscaling")
     parser.add_argument("--detect-only", action="store_true",
                         help="Skip PaddleOCR recognition; send ALL detected regions to Qwen")
     args = parser.parse_args()
@@ -141,6 +172,12 @@ def main():
     pdf_path = Path(args.input)
     if not pdf_path.exists():
         print(f"Error: {pdf_path} not found")
+        return
+    if args.max_pages < 1:
+        print("Error: --max-pages must be >= 1")
+        return
+    if args.max_render_pixels < 1:
+        print("Error: --max-render-pixels must be >= 1")
         return
 
     output_dir = Path(args.output_dir)
@@ -156,6 +193,8 @@ def main():
         "--input", str(pdf_path),
         "--output", str(detect_json),
         "--lang", args.lang,
+        "--max-pages", str(args.max_pages),
+        "--max-render-pixels", str(args.max_render_pixels),
     ]
     if args.detect_only:
         cmd.append("--detect-only")
@@ -182,7 +221,11 @@ def main():
     # === Phase 2: Qwen recognition (individual crops, low-confidence only) ===
     print("=== Phase 2: Qwen Recognition ===")
     print(f"Converting {pdf_path.name} to images...")
-    images = pdf_to_images(str(pdf_path))
+    images = pdf_to_images(
+        str(pdf_path),
+        max_pages=args.max_pages,
+        max_render_pixels=args.max_render_pixels,
+    )
 
     model, processor = load_qwen()
 

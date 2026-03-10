@@ -16,6 +16,20 @@ from label_studio_ml.model import LabelStudioMLBase
 from PIL import Image
 from qwen_vl_utils import process_vision_info
 from transformers import AutoProcessor, BitsAndBytesConfig, Qwen3VLForConditionalGeneration
+try:
+    from .security_utils import (
+        build_allowed_hosts,
+        parse_bool,
+        same_host,
+        validate_remote_http_url,
+    )
+except ImportError:
+    from security_utils import (
+        build_allowed_hosts,
+        parse_bool,
+        same_host,
+        validate_remote_http_url,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -41,19 +55,48 @@ RENDER_DPI = 300
 MAX_DIM = 2048
 CROP_PAD = 4
 CONF_THRESHOLD = 0.9
+MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024
+MAX_PDF_PAGES = 200
+MAX_RENDER_PIXELS = 16 * 1024 * 1024
+DOWNLOAD_CONNECT_TIMEOUT_SEC = 10.0
+DOWNLOAD_READ_TIMEOUT_SEC = 120.0
 
 
-def pdf_to_images(pdf_path: str) -> list[Image.Image]:
+def _safe_render_matrix(page: fitz.Page, max_render_pixels: int) -> fitz.Matrix:
+    base_zoom = RENDER_DPI / 72
+    target_w = max(page.rect.width * base_zoom, 1.0)
+    target_h = max(page.rect.height * base_zoom, 1.0)
+    target_pixels = target_w * target_h
+    if target_pixels > max_render_pixels:
+        scale = (max_render_pixels / target_pixels) ** 0.5
+        zoom = max(base_zoom * scale, 0.1)
+    else:
+        zoom = base_zoom
+    return fitz.Matrix(zoom, zoom)
+
+
+def pdf_to_images(
+    pdf_path: str,
+    max_pages: int = MAX_PDF_PAGES,
+    max_render_pixels: int = MAX_RENDER_PIXELS,
+) -> list[Image.Image]:
     doc = fitz.open(pdf_path)
     images = []
-    for page in doc:
-        mat = fitz.Matrix(RENDER_DPI / 72, RENDER_DPI / 72)
-        pix = page.get_pixmap(matrix=mat)
-        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-        if img.width > MAX_DIM or img.height > MAX_DIM:
-            img.thumbnail((MAX_DIM, MAX_DIM), Image.LANCZOS)
-        images.append(img)
-    doc.close()
+    try:
+        if doc.page_count > max_pages:
+            raise ValueError(
+                f"PDF has {doc.page_count} pages; limit is {max_pages}. "
+                "Increase MAX_PDF_PAGES to allow this file."
+            )
+        for page in doc:
+            mat = _safe_render_matrix(page, max_render_pixels)
+            pix = page.get_pixmap(matrix=mat)
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            if img.width > MAX_DIM or img.height > MAX_DIM:
+                img.thumbnail((MAX_DIM, MAX_DIM), Image.LANCZOS)
+            images.append(img)
+    finally:
+        doc.close()
     return images
 
 
@@ -114,6 +157,31 @@ class HybridOCRBackend(LabelStudioMLBase):
             or os.environ.get("LABEL_STUDIO_ACCESS_TOKEN", "")
             or kwargs.get("access_token", "")
         )
+        self.allowed_download_hosts = build_allowed_hosts(
+            self.ls_url,
+            os.environ.get("ALLOWED_DOWNLOAD_HOSTS", ""),
+        )
+        self.allow_local_task_files = parse_bool(
+            os.environ.get("ALLOW_LOCAL_TASK_FILES"),
+            default=False,
+        )
+        self.max_download_bytes = max(
+            1,
+            int(os.environ.get("MAX_DOWNLOAD_BYTES", MAX_DOWNLOAD_BYTES)),
+        )
+        self.max_pdf_pages = max(1, int(os.environ.get("MAX_PDF_PAGES", MAX_PDF_PAGES)))
+        self.max_render_pixels = max(
+            1,
+            int(os.environ.get("MAX_RENDER_PIXELS", MAX_RENDER_PIXELS)),
+        )
+        self.download_connect_timeout = max(
+            0.1,
+            float(os.environ.get("DOWNLOAD_CONNECT_TIMEOUT_SEC", DOWNLOAD_CONNECT_TIMEOUT_SEC)),
+        )
+        self.download_read_timeout = max(
+            0.1,
+            float(os.environ.get("DOWNLOAD_READ_TIMEOUT_SEC", DOWNLOAD_READ_TIMEOUT_SEC)),
+        )
 
         # Lazy-loaded on first predict() call to avoid timeout during /setup
         self.qwen_model = None
@@ -140,39 +208,83 @@ class HybridOCRBackend(LabelStudioMLBase):
         )
         logger.info("Qwen model loaded.")
 
-    def _download_task_file(self, url: str) -> str:
-        """Download file from Label Studio to a local temp path.
+    def _download_remote_file(self, url: str) -> str:
+        parsed = validate_remote_http_url(url, self.allowed_download_hosts)
 
-        Handles /data/upload/... URLs by fetching via Label Studio API,
-        full http(s) URLs directly, and local file:// paths as-is.
+        headers = {}
+        if self.ls_api_key and same_host(url, self.ls_url):
+            headers["Authorization"] = f"Token {self.ls_api_key}"
+
+        suffix = Path(parsed.path).suffix or ".bin"
+        tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+        tmp_path = tmp.name
+        tmp.close()
+
+        total_bytes = 0
+        timeout = (self.download_connect_timeout, self.download_read_timeout)
+
+        try:
+            with requests.get(
+                url,
+                headers=headers,
+                timeout=timeout,
+                stream=True,
+                allow_redirects=False,
+            ) as resp:
+                if 300 <= resp.status_code < 400:
+                    raise ValueError("Redirect responses are not allowed for downloads")
+                resp.raise_for_status()
+
+                with open(tmp_path, "wb") as out:
+                    for chunk in resp.iter_content(chunk_size=64 * 1024):
+                        if not chunk:
+                            continue
+                        total_bytes += len(chunk)
+                        if total_bytes > self.max_download_bytes:
+                            raise ValueError(
+                                f"Download exceeds MAX_DOWNLOAD_BYTES={self.max_download_bytes}"
+                            )
+                        out.write(chunk)
+        except Exception:
+            Path(tmp_path).unlink(missing_ok=True)
+            raise
+
+        logger.info("Downloaded %s -> %s (%d bytes)", url, tmp_path, total_bytes)
+        return tmp_path
+
+    def _download_task_file(self, url: str) -> tuple[str, bool]:
+        """Resolve a task input to local path.
+
+        Returns: (path, should_cleanup).
         """
-        # Relative Label Studio upload path (e.g. "/data/upload/1/file.pdf")
         if url.startswith("/data/"):
             url = f"{self.ls_url}{url}"
 
         parsed = urlparse(url)
 
-        # Already a local file (but not a /data/ path we just converted)
-        if parsed.scheme == "file":
-            return parsed.path
-        if not parsed.scheme:
-            return url
+        if parsed.scheme in {"file", ""}:
+            if not self.allow_local_task_files:
+                raise ValueError(
+                    "Local task paths are disabled. "
+                    "Set ALLOW_LOCAL_TASK_FILES=true only in trusted environments."
+                )
+            local_path = parsed.path if parsed.scheme == "file" else url
+            if not Path(local_path).exists():
+                raise FileNotFoundError(local_path)
+            return local_path, False
 
-        headers = {}
-        if self.ls_api_key:
-            headers["Authorization"] = f"Token {self.ls_api_key}"
+        return self._download_remote_file(url), True
 
-        resp = requests.get(url, headers=headers, timeout=120)
-        resp.raise_for_status()
-
-        # Determine suffix from original URL path
-        orig_path = urlparse(url).path
-        suffix = Path(orig_path).suffix or ".bin"
-        tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
-        tmp.write(resp.content)
-        tmp.close()
-        logger.info("Downloaded %s -> %s (%d bytes)", url, tmp.name, len(resp.content))
-        return tmp.name
+    def _validate_pdf_limits(self, pdf_path: str) -> None:
+        doc = fitz.open(pdf_path)
+        try:
+            if doc.page_count > self.max_pdf_pages:
+                raise ValueError(
+                    f"PDF has {doc.page_count} pages; limit is {self.max_pdf_pages}. "
+                    "Increase MAX_PDF_PAGES to allow this file."
+                )
+        finally:
+            doc.close()
 
     def _run_paddle_detection(self, input_path: str) -> dict:
         """Run PaddleOCR detection as subprocess, return parsed JSON."""
@@ -188,18 +300,23 @@ class HybridOCRBackend(LabelStudioMLBase):
             output_json,
             "--lang",
             self.lang,
+            "--max-pages",
+            str(self.max_pdf_pages),
+            "--max-render-pixels",
+            str(self.max_render_pixels),
         ]
         logger.info("Running PaddleOCR detection: %s", " ".join(cmd))
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            logger.error("PaddleOCR detection failed: %s", result.stderr)
-            raise RuntimeError(f"PaddleOCR detection failed: {result.stderr}")
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                logger.error("PaddleOCR detection failed: %s", result.stderr)
+                raise RuntimeError(f"PaddleOCR detection failed: {result.stderr}")
 
-        with open(output_json) as f:
-            data = json.load(f)
-
-        Path(output_json).unlink(missing_ok=True)
-        return data
+            with open(output_json) as f:
+                data = json.load(f)
+            return data
+        finally:
+            Path(output_json).unlink(missing_ok=True)
 
     def _process_image_detections(
         self, image: Image.Image, detections: list[dict], page_idx: int
@@ -280,8 +397,9 @@ class HybridOCRBackend(LabelStudioMLBase):
                 continue
 
             local_path = None
+            cleanup_local_path = False
             try:
-                local_path = self._download_task_file(image_url)
+                local_path, cleanup_local_path = self._download_task_file(image_url)
             except Exception as e:
                 logger.error("Failed to download %s: %s", image_url, e)
                 predictions.append({"result": [], "score": 0})
@@ -291,8 +409,13 @@ class HybridOCRBackend(LabelStudioMLBase):
 
             try:
                 if is_pdf:
+                    self._validate_pdf_limits(local_path)
                     detect_data = self._run_paddle_detection(local_path)
-                    images = pdf_to_images(local_path)
+                    images = pdf_to_images(
+                        local_path,
+                        max_pages=self.max_pdf_pages,
+                        max_render_pixels=self.max_render_pixels,
+                    )
 
                     all_results = []
                     for page_data in detect_data["pages"]:
@@ -333,8 +456,7 @@ class HybridOCRBackend(LabelStudioMLBase):
                 logger.exception("Error processing task %s: %s", task.get("id"), e)
                 predictions.append({"result": [], "score": 0})
             finally:
-                # Clean up temp file if we downloaded it
-                if local_path and local_path.startswith(tempfile.gettempdir()):
+                if cleanup_local_path and local_path:
                     Path(local_path).unlink(missing_ok=True)
 
         return predictions

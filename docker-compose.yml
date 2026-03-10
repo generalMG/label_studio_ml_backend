@@ -10,7 +10,7 @@ services:
       - DJANGO_DB=default
       - POSTGRE_NAME=postgres
       - POSTGRE_USER=postgres
-      - POSTGRE_PASSWORD=
+      - POSTGRE_PASSWORD=${POSTGRES_PASSWORD:-labelstudio}
       - POSTGRE_PORT=5432
       - POSTGRE_HOST=db
       - LABEL_STUDIO_HOST=${LABEL_STUDIO_HOST:-http://localhost:8080}
@@ -30,8 +30,9 @@ services:
     hostname: db
     restart: unless-stopped
     environment:
-      - POSTGRES_HOST_AUTH_METHOD=trust
       - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-labelstudio}
+      - POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256 --auth-local=scram-sha-256
     volumes:
       - ./postgres-data:/var/lib/postgresql/data
 
@@ -43,8 +44,16 @@ services:
       - "9090:9090"
     environment:
       - LABEL_STUDIO_URL=http://label-studio:8080
-      # Add API key if needed
-      # - LABEL_STUDIO_API_KEY=...
+      - LABEL_STUDIO_API_KEY=${LABEL_STUDIO_API_KEY:-}
+      - LABEL_STUDIO_ACCESS_TOKEN=${LABEL_STUDIO_API_KEY:-}
+      - REQUIRE_WEBHOOK_AUTH=${REQUIRE_WEBHOOK_AUTH:-true}
+      - PDF_WEBHOOK_SECRET=${PDF_WEBHOOK_SECRET:-change-me-dev-secret}
+      - PDF_WEBHOOK_SECRET_HEADER=${PDF_WEBHOOK_SECRET_HEADER:-X-Webhook-Secret}
+      - ALLOWED_DOWNLOAD_HOSTS=${ALLOWED_DOWNLOAD_HOSTS:-}
+      - ALLOW_LOCAL_TASK_FILES=${ALLOW_LOCAL_TASK_FILES:-false}
+      - MAX_DOWNLOAD_BYTES=${MAX_DOWNLOAD_BYTES:-104857600}
+      - MAX_PDF_PAGES=${MAX_PDF_PAGES:-200}
+      - MAX_RENDER_PIXELS=${MAX_RENDER_PIXELS:-16777216}
       # Model configuration
       - HYBRID_OCR_CONF_THRESHOLD=0.9
       - HYBRID_OCR_LANG=korean

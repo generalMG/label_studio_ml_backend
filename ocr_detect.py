@@ -1,6 +1,7 @@
 """Phase 1: PaddleOCR text detection. Run as separate process to avoid GPU conflicts with PyTorch."""
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -11,20 +12,46 @@ from paddleocr import PaddleOCR
 
 RENDER_DPI = 300
 MAX_DIM = 2048
+MAX_PDF_PAGES = 200
+MAX_RENDER_PIXELS = 16 * 1024 * 1024
 
 
-def pdf_to_images(pdf_path: str) -> list[Image.Image]:
+def _safe_render_matrix(page: fitz.Page, max_render_pixels: int) -> fitz.Matrix:
+    base_zoom = RENDER_DPI / 72
+    target_w = max(page.rect.width * base_zoom, 1.0)
+    target_h = max(page.rect.height * base_zoom, 1.0)
+    target_pixels = target_w * target_h
+    if target_pixels > max_render_pixels:
+        scale = (max_render_pixels / target_pixels) ** 0.5
+        zoom = max(base_zoom * scale, 0.1)
+    else:
+        zoom = base_zoom
+    return fitz.Matrix(zoom, zoom)
+
+
+def pdf_to_images(
+    pdf_path: str,
+    max_pages: int = MAX_PDF_PAGES,
+    max_render_pixels: int = MAX_RENDER_PIXELS,
+) -> list[Image.Image]:
     doc = fitz.open(pdf_path)
     images = []
-    for i, page in enumerate(doc):
-        mat = fitz.Matrix(RENDER_DPI / 72, RENDER_DPI / 72)
-        pix = page.get_pixmap(matrix=mat)
-        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-        if img.width > MAX_DIM or img.height > MAX_DIM:
-            img.thumbnail((MAX_DIM, MAX_DIM), Image.LANCZOS)
-        print(f"  Page {i + 1}: {img.width}x{img.height}", file=sys.stderr)
-        images.append(img)
-    doc.close()
+    try:
+        if doc.page_count > max_pages:
+            raise ValueError(
+                f"PDF has {doc.page_count} pages; limit is {max_pages}. "
+                "Increase MAX_PDF_PAGES to allow this file."
+            )
+        for i, page in enumerate(doc):
+            mat = _safe_render_matrix(page, max_render_pixels)
+            pix = page.get_pixmap(matrix=mat)
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            if img.width > MAX_DIM or img.height > MAX_DIM:
+                img.thumbnail((MAX_DIM, MAX_DIM), Image.LANCZOS)
+            print(f"  Page {i + 1}: {img.width}x{img.height}", file=sys.stderr)
+            images.append(img)
+    finally:
+        doc.close()
     return images
 
 
@@ -85,6 +112,18 @@ def main():
     parser.add_argument("--input", required=True)
     parser.add_argument("--output", required=True, help="Output JSON path for detections")
     parser.add_argument("--lang", default="korean")
+    parser.add_argument(
+        "--max-pages",
+        type=int,
+        default=int(os.environ.get("MAX_PDF_PAGES", MAX_PDF_PAGES)),
+        help="Maximum PDF page count allowed",
+    )
+    parser.add_argument(
+        "--max-render-pixels",
+        type=int,
+        default=int(os.environ.get("MAX_RENDER_PIXELS", MAX_RENDER_PIXELS)),
+        help="Maximum rendered pixels per page before downscaling",
+    )
     parser.add_argument("--detect-only", action="store_true",
                         help="Skip PaddleOCR recognition, return bboxes only (conf=0)")
     args = parser.parse_args()
@@ -93,9 +132,23 @@ def main():
     if not pdf_path.exists():
         print(f"Error: {pdf_path} not found", file=sys.stderr)
         sys.exit(1)
+    if args.max_pages < 1:
+        print("Error: --max-pages must be >= 1", file=sys.stderr)
+        sys.exit(1)
+    if args.max_render_pixels < 1:
+        print("Error: --max-render-pixels must be >= 1", file=sys.stderr)
+        sys.exit(1)
 
     print("Converting PDF to images...", file=sys.stderr)
-    images = pdf_to_images(str(pdf_path))
+    try:
+        images = pdf_to_images(
+            str(pdf_path),
+            max_pages=args.max_pages,
+            max_render_pixels=args.max_render_pixels,
+        )
+    except Exception as e:
+        print(f"Error: failed to render PDF: {e}", file=sys.stderr)
+        sys.exit(1)
     print(f"{len(images)} pages.\n", file=sys.stderr)
 
     print("Initializing PaddleOCR...", file=sys.stderr)
